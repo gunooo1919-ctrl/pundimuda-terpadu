@@ -1,0 +1,224 @@
+"use client";
+
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+} from "react";
+import { initializeApp } from "firebase/app";
+import {
+  getAuth,
+  signInAnonymously,
+  signInWithCustomToken,
+  onAuthStateChanged,
+} from "firebase/auth";
+import {
+  getFirestore,
+  doc,
+  onSnapshot,
+  setDoc, // PERBAIKAN: Menambahkan setDoc yang hilang
+  collection,
+  query,
+  setLogLevel,
+} from "firebase/firestore";
+
+// --- Global Variables (Disediakan oleh Canvas) ---
+// Harap JANGAN hapus variabel ini. Canvas akan menyediakannya saat runtime.
+const rawAppId = typeof __app_id !== "undefined" ? __app_id : "default-app-id";
+// PERBAIKAN: Bersihkan appId agar hanya menyisakan ID yang valid (misal: 'c_bcba5a70ed33b0b1')
+const appIdMatch = rawAppId.match(/c_[a-z0-9]+/);
+const appId = appIdMatch ? appIdMatch[0] : "default-app-id";
+
+const firebaseConfig =
+  typeof __firebase_config !== "undefined" ? JSON.parse(__firebase_config) : {};
+const initialAuthToken =
+  typeof __initial_auth_token !== "undefined" ? __initial_auth_token : null;
+
+// Konteks Utama
+const AppContext = createContext();
+
+// Hook kustom untuk menggunakan Context
+export const useAppContext = () => useContext(AppContext);
+
+// --- KOMPONEN PROVIDER UTAMA ---
+export default function AppProvider({ children }) {
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [userData, setUserData] = useState({});
+  const [toast, setToast] = useState(null);
+
+  // --- 1. INISIALISASI FIREBASE ---
+  useEffect(() => {
+    // Matikan log error karena sudah terbukti berjalan cepat
+    setLogLevel("silent");
+
+    try {
+      if (!db && Object.keys(firebaseConfig).length > 0) {
+        const app = initializeApp(firebaseConfig);
+        const firestoreDb = getFirestore(app);
+        const firebaseAuth = getAuth(app);
+
+        setDb(firestoreDb);
+        setAuth(firebaseAuth);
+
+        // --- Otentikasi & Listener Auth ---
+        onAuthStateChanged(firebaseAuth, async (user) => {
+          if (user) {
+            setUserId(user.uid);
+          } else {
+            // Jika tidak ada user (atau token hilang), sign in anonim
+            const anonUser = await signInAnonymously(firebaseAuth);
+            setUserId(anonUser.user.uid);
+          }
+          setIsAuthReady(true);
+        });
+
+        // Penggunaan custom token saat runtime Canvas tersedia
+        if (initialAuthToken) {
+          signInWithCustomToken(firebaseAuth, initialAuthToken).catch(
+            (error) => {
+              console.error("Firebase custom sign in failed:", error);
+              // Fallback ke anonim jika token gagal
+              signInAnonymously(firebaseAuth);
+            }
+          );
+        }
+      } else if (!Object.keys(firebaseConfig).length) {
+        console.warn("Firebase config not found. Running in mock mode.");
+        // Mode mock jika Firebase tidak tersedia (hanya untuk development)
+        setUserId(crypto.randomUUID());
+        setIsAuthReady(true);
+      }
+    } catch (error) {
+      console.error("Firebase initialization failed:", error);
+      // Fallback ke mode mock
+      setUserId(crypto.randomUUID());
+      setIsAuthReady(true);
+    }
+  }, []); // Jalankan hanya sekali
+
+  // --- 2. LISTENER DATA PENGGUNA (REALTIME) ---
+  useEffect(() => {
+    if (!db || !auth || !userId || !isAuthReady) return;
+
+    // Path ke dokumen user private: /artifacts/{appId}/users/{userId}/userData/profile
+    const userDocRef = doc(
+      db,
+      `artifacts/${appId}/users/${userId}/userData`,
+      "profile"
+    );
+
+    // Listener realtime data pengguna
+    const unsubscribe = onSnapshot(
+      userDocRef,
+      (docSnap) => {
+        if (docSnap.exists()) {
+          setUserData(docSnap.data());
+        } else {
+          // Jika dokumen profil tidak ada, buat dokumen awal (optional, tapi baik)
+          console.log("User profile not found. Initializing...");
+          // Menggunakan setDoc yang sekarang sudah diimport
+          setDoc(userDocRef, {
+            name: "PundiMuda User",
+            lastLogin: new Date().toISOString(),
+            // Inisialisasi data penting lainnya
+          }).catch((e) => console.error("Error setting initial user data:", e));
+        }
+      },
+      (error) => {
+        console.error("Error listening to user data:", error);
+      }
+    );
+
+    return () => unsubscribe(); // Cleanup listener saat komponen di-unmount
+  }, [db, auth, userId, isAuthReady]);
+
+  // --- 3. TOAST (PESAN POP-UP) LOGIC ---
+  const displayMessage = useCallback((message, type = "info") => {
+    // Tipe: 'success', 'error', 'info', 'warning'
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(null);
+    }, 4000); // Pesan akan hilang setelah 4 detik
+  }, []);
+
+  // --- 4. Fungsi Utility ---
+  const formatCurrency = useCallback((amount) => {
+    if (typeof amount !== "number") return "Rp 0";
+    return `Rp ${amount.toLocaleString("id-ID")}`;
+  }, []);
+
+  // Nilai Context yang Disediakan
+  const contextValue = {
+    db,
+    auth,
+    userId,
+    isAuthReady,
+    userData,
+    displayMessage,
+    formatCurrency,
+    appId, // Sediakan appId untuk path publik
+  };
+
+  if (!isAuthReady) {
+    // Tampilkan loading screen sederhana
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-100">
+        <div className="flex flex-col items-center p-6 bg-white rounded-xl shadow-lg">
+          <svg
+            className="animate-spin h-8 w-8 text-indigo-600 mb-3"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+          >
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+            ></circle>
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            ></path>
+          </svg>
+          <p className="text-gray-600 font-semibold">
+            Memuat Konfigurasi PWA...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <AppContext.Provider value={contextValue}>
+      {children}
+
+      {/* Toast Notification (Pesan Pop-up) */}
+      {toast && (
+        <div
+          className={`fixed bottom-5 right-5 p-4 rounded-lg shadow-xl text-white transition-opacity duration-300 z-50 
+            ${
+              toast.type === "success"
+                ? "bg-green-500"
+                : toast.type === "error"
+                ? "bg-red-500"
+                : toast.type === "warning"
+                ? "bg-yellow-500"
+                : "bg-blue-500"
+            }`}
+          style={{ opacity: toast ? 1 : 0 }}
+        >
+          {toast.message}
+        </div>
+      )}
+    </AppContext.Provider>
+  );
+}
